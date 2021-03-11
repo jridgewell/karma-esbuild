@@ -36,7 +36,7 @@ function getBasePath(config: karma.ConfigOptions) {
 
 function createPreprocessor(
 	config: karma.ConfigOptions & {
-		esbuild?: { bundleDelay?: number; format?: esbuild.Format };
+		esbuild?: { bundleDelay?: number };
 	},
 	emitter: karma.Server,
 	log: Log,
@@ -44,7 +44,7 @@ function createPreprocessor(
 	bundle: Bundle,
 ): KarmaPreprocess {
 	const basePath = getBasePath(config);
-	const { bundleDelay = 700, format } = config.esbuild || {};
+	const { bundleDelay = 700 } = config.esbuild || {};
 
 	// Inject middleware to handle the bundled file and map.
 	if (!config.middleware) {
@@ -145,7 +145,6 @@ function createPreprocessor(
 		if (filePath === testEntryPoint.file) {
 			const item = await bundle.read();
 			file.sourceMap = item.map;
-			file.type = format === "esm" ? "module" : "js";
 			done(null, item.code);
 			return;
 		}

@@ -18,6 +18,9 @@ export class Bundle {
 	private declare log: Log;
 	private declare config: esbuild.BuildOptions;
 
+	// Tracks module paths found during traversal
+	modules = new Set<string>();
+
 	// Dirty signifies that that the current result is stale, and a new build is
 	// needed. It's reset during the next build.
 	private _dirty = false;
@@ -32,21 +35,33 @@ export class Bundle {
 		this.file = file;
 		this.log = log;
 
+		const define = {
+			"process.env.NODE_ENV": JSON.stringify(
+				process.env.NODE_ENV || "development",
+			),
+			...config.define,
+		};
+		const plugins: esbuild.Plugin[] = [
+			{
+				name: "before",
+				setup: build => {
+					build.onResolve({ filter: /./ }, this.track.bind(this, "resolve"));
+					build.onLoad({ filter: /./ }, this.track.bind(this, "load"));
+				},
+			},
+			...(config.plugins || []),
+		];
 		this.config = {
 			target: "es2015",
+			bundle: true,
 			...config,
 			entryPoints: [file],
-			bundle: true,
 			write: false,
 			incremental: true,
 			platform: "browser",
 			sourcemap: "external",
-			define: {
-				"process.env.NODE_ENV": JSON.stringify(
-					process.env.NODE_ENV || "development",
-				),
-				...config.define,
-			},
+			define,
+			plugins,
 		};
 	}
 
@@ -112,6 +127,19 @@ export class Bundle {
 				map: {} as SourceMapPayload,
 			};
 		}
+	}
+
+	private track(
+		type: "load" | "resolve",
+		args: { resolveDir?: string; path: string },
+	) {
+		const module = path.resolve(args.resolveDir || "", args.path);
+		if (type === "load") {
+			this.modules.add(module);
+		} else {
+			this.modules.delete(module);
+		}
+		return null;
 	}
 
 	private processResult(result: BuildResult) {

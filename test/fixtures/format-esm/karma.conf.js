@@ -6,6 +6,17 @@ module.exports = function (config) {
 
 		esbuild: {
 			format: "esm",
+			plugins: [
+				{
+					name: "externalizer",
+					setup(build) {
+						build.onResolve({ filter: /./ }, args => {
+							if (args.importer === "") return null;
+							return { external: true };
+						});
+					},
+				},
+			],
 		},
 	});
 };
