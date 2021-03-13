@@ -6,6 +6,7 @@ module.exports = function (config) {
 
 		esbuild: {
 			format: "esm",
+			target: "es2020",
 			plugins: [
 				{
 					name: "externalizer",

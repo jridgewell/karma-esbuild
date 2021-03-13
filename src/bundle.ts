@@ -1,6 +1,7 @@
 import * as path from "path";
+import * as fs from "fs";
 import * as esbuild from "esbuild";
-import { Deferred } from "./utils";
+import { Deferred, formatTime } from "./utils";
 
 import type { Log } from "./utils";
 import type { SourceMapPayload } from "module";
@@ -13,7 +14,7 @@ type BuildResult = esbuild.BuildIncremental & {
 	outputFiles: esbuild.OutputFile[];
 };
 
-export class Bundle {
+export class Bundler {
 	private declare file: string;
 	private declare log: Log;
 	private declare config: esbuild.BuildOptions;
@@ -23,13 +24,14 @@ export class Bundle {
 
 	// Dirty signifies that that the current result is stale, and a new build is
 	// needed. It's reset during the next build.
-	private _dirty = false;
+	private _dirty = true;
 	// buildsInProgress tracks the number of builds. When a build takes too
 	// long, a new build may have started before the original completed. In this
 	// case, we resolve the old build with the latest result.
 	private buildsInProgress = 0;
 	private deferred = new Deferred<BundledFile>();
 	private incrementalBuild: esbuild.BuildIncremental | null = null;
+	private startTime = 0;
 
 	constructor(file: string, log: Log, config: esbuild.BuildOptions) {
 		this.file = file;
@@ -45,17 +47,20 @@ export class Bundle {
 			{
 				name: "before",
 				setup: build => {
-					build.onResolve({ filter: /./ }, this.track.bind(this, "resolve"));
-					build.onLoad({ filter: /./ }, this.track.bind(this, "load"));
+					build.onResolve({ filter: /./ }, args => {
+						const module = path.resolve(args.resolveDir, args.path);
+						this.modules.add(module);
+						return null;
+					});
 				},
 			},
 			...(config.plugins || []),
 		];
 		this.config = {
 			target: "es2015",
-			bundle: true,
 			...config,
 			entryPoints: [file],
+			bundle: true,
 			write: false,
 			incremental: true,
 			platform: "browser",
@@ -71,8 +76,9 @@ export class Bundle {
 		this.deferred = new Deferred();
 	}
 
-	async write(beforeProcess: () => void, afterProcess: () => void) {
-		if (this.buildsInProgress === 0) beforeProcess();
+	async write() {
+		if (!this._dirty) return this.deferred.promise;
+		if (this.buildsInProgress === 0) this.beforeProcess();
 		this.buildsInProgress++;
 
 		const { deferred } = this;
@@ -86,9 +92,20 @@ export class Bundle {
 			return deferred.promise;
 		}
 
-		afterProcess();
+		this.afterProcess();
 		deferred.resolve(result);
 		return result;
+	}
+
+	private beforeProcess() {
+		this.startTime = Date.now();
+		this.log.info(`Compiling to ${this.file}...`);
+	}
+
+	private afterProcess() {
+		this.log.info(
+			`Compiling done (${formatTime(Date.now() - this.startTime)})`,
+		);
 	}
 
 	read() {
@@ -129,20 +146,8 @@ export class Bundle {
 		}
 	}
 
-	private track(
-		type: "load" | "resolve",
-		args: { resolveDir?: string; path: string },
-	) {
-		const module = path.resolve(args.resolveDir || "", args.path);
-		if (type === "load") {
-			this.modules.add(module);
-		} else {
-			this.modules.delete(module);
-		}
-		return null;
-	}
-
 	private processResult(result: BuildResult) {
+		console.log(this.modules);
 		const map = JSON.parse(result.outputFiles[0].text) as SourceMapPayload;
 		const source = result.outputFiles[1].text;
 
