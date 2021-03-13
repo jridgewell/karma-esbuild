@@ -18,26 +18,19 @@ export function random(length: number) {
 	return crypto.randomBytes(length).toString("hex");
 }
 
-export function debounce<A extends any[], R>(
-	fn: (...args: A) => R,
-	ms: number,
-) {
+export function debounce<A extends any[], R>(fn: () => R, ms: number) {
 	let timeout: NodeJS.Timeout;
-	let _args: A | undefined;
 	let _deferred: Deferred<R> | undefined;
 	function process() {
-		const args = _args!;
 		const deferred = _deferred!;
-		_args = undefined;
 		_deferred = undefined;
 		try {
-			deferred.resolve(fn(...args));
+			deferred.resolve(fn());
 		} catch (e) {
 			deferred.reject(e);
 		}
 	}
 	return (...args: A): Promise<R> => {
-		_args = args;
 		_deferred ||= new Deferred();
 		clearTimeout(timeout);
 		timeout = setTimeout(process, ms);

@@ -19,9 +19,6 @@ export class Bundler {
 	private declare log: Log;
 	private declare config: esbuild.BuildOptions;
 
-	// Tracks module paths found during traversal
-	modules = new Set<string>();
-
 	// Dirty signifies that that the current result is stale, and a new build is
 	// needed. It's reset during the next build.
 	private _dirty = true;
@@ -36,38 +33,7 @@ export class Bundler {
 	constructor(file: string, log: Log, config: esbuild.BuildOptions) {
 		this.file = file;
 		this.log = log;
-
-		const define = {
-			"process.env.NODE_ENV": JSON.stringify(
-				process.env.NODE_ENV || "development",
-			),
-			...config.define,
-		};
-		const plugins: esbuild.Plugin[] = [
-			{
-				name: "before",
-				setup: build => {
-					build.onResolve({ filter: /./ }, args => {
-						const module = path.resolve(args.resolveDir, args.path);
-						this.modules.add(module);
-						return null;
-					});
-				},
-			},
-			...(config.plugins || []),
-		];
-		this.config = {
-			target: "es2015",
-			...config,
-			entryPoints: [file],
-			bundle: true,
-			write: false,
-			incremental: true,
-			platform: "browser",
-			sourcemap: "external",
-			define,
-			plugins,
-		};
+		this.config = { ...config, entryPoints: [file] };
 	}
 
 	dirty() {
@@ -147,7 +113,6 @@ export class Bundler {
 	}
 
 	private processResult(result: BuildResult) {
-		console.log(this.modules);
 		const map = JSON.parse(result.outputFiles[0].text) as SourceMapPayload;
 		const source = result.outputFiles[1].text;
 

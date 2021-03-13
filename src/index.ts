@@ -1,11 +1,10 @@
 import { debounce } from "./utils";
-import { Bundler } from "./bundle";
 import { TestEntryPoint } from "./test-entry-point";
-import { MapDefault } from "./map-default";
+import { BundlerMap } from "./bundler-map";
 import chokidar from "chokidar";
 import * as path from "path";
 
-import esbuild, { serve } from "esbuild";
+import type esbuild from "esbuild";
 import type karma from "karma";
 import type { SourceMapPayload } from "module";
 import type { IncomingMessage, ServerResponse } from "http";
@@ -31,8 +30,6 @@ interface KarmaLogger {
 	create(label: string): Log;
 }
 
-type BundlerFactory = (file: string) => Bundler;
-
 function getBasePath(config: karma.ConfigOptions) {
 	return config.basePath || process.cwd();
 }
@@ -44,11 +41,11 @@ function createPreprocessor(
 	emitter: karma.Server,
 	log: Log,
 	testEntryPoint: TestEntryPoint,
-	bundlerMap: MapDefault<string, Bundler>,
+	bundlerMap: BundlerMap,
 ): KarmaPreprocess {
 	const basePath = getBasePath(config);
 	const { bundleDelay = 700, format } = config.esbuild || {};
-	const bundler = bundlerMap.getOr(testEntryPoint.file);
+	const bundler = bundlerMap.getOrInitSync(testEntryPoint.file);
 
 	// Inject middleware to handle the bundled file and map.
 	config.beforeMiddleware ||= [];
@@ -71,6 +68,16 @@ function createPreprocessor(
 		served: true,
 		watched: false,
 	});
+	// If we're "preprocessing" a bundle, then .
+	if (filePath === testEntryPoint.file) {
+		const bundler = await bundlerMap.getOrInit(filePath);
+		const item = await bundler.read();
+		file.sourceMap = item.map;
+		file.type = format === "esm" ? "module" : "js";
+		done(null, item.code);
+		return;
+	}
+
 	testEntryPoint.touch();
 
 	let watcher: FSWatcher | null = null;
@@ -103,7 +110,7 @@ function createPreprocessor(
 		const onWatch = debounce(() => {
 			// Dirty the bundler first, to make sure we don't attempt to read an
 			// already compiled result.
-			bundler.dirty();
+			bundlerMap.dirty();
 			emitter.refreshFiles();
 		}, 100);
 		watcher.on("change", onWatch);
@@ -113,13 +120,14 @@ function createPreprocessor(
 	let stopped = false;
 	emitter.on("exit", done => {
 		stopped = true;
-		bundler.stop().then(done);
+		bundlerMap.stop().then(done);
 	});
 
 	const buildBundle = debounce(() => {
 		// Prevent service closed message when we are still processing
 		if (stopped) return;
 		testEntryPoint.write();
+		bundlerMap.sync();
 		return bundler.write();
 	}, bundleDelay);
 
@@ -129,18 +137,8 @@ function createPreprocessor(
 		// need to test equality.
 		const filePath = path.normalize(file.originalPath);
 
-		// If we're "preprocessing" the bundler file, all we need is to wait for
-		// the bundle to be generated for it.
-		if (filePath === testEntryPoint.file) {
-			const item = await bundler.read();
-			file.sourceMap = item.map;
-			file.type = format === "esm" ? "module" : "js";
-			done(null, item.code);
-			return;
-		}
-
 		testEntryPoint.addFile(filePath);
-		bundler.dirty();
+		bundlerMap.dirty();
 		buildBundle();
 
 		// Turn the file into a `dom` type with empty contents to get Karma to
@@ -158,11 +156,11 @@ createPreprocessor.$inject = [
 	"karmaEsbuildBundlerMap",
 ];
 
-function createSourcemapMiddleware(
+function createMiddleware(
 	testEntryPoint: TestEntryPoint,
-	bundlerMap: MapDefault<string, Bundler>,
+	bundlerMap: BundlerMap,
 ) {
-	const testBundler = bundlerMap.getOr(testEntryPoint.file);
+	const testBundler = bundlerMap.getOrInitSync(testEntryPoint.file);
 	return async function (
 		req: IncomingMessage,
 		res: ServerResponse,
@@ -176,9 +174,9 @@ function createSourcemapMiddleware(
 		const filePath = path.normalize(match[1]);
 		const isMap = match[2] === ".map";
 
-		if (!isModule(filePath)) return next();
+		if (!bundlerMap.has(filePath)) return next();
 
-		const bundler = bundlerMap.getOr(filePath);
+		const bundler = await bundlerMap.getOrInit(filePath);
 		// Writing on the testBundler is handled by the preprocessor.
 		if (bundler !== testBundler) bundler.write();
 
@@ -191,72 +189,68 @@ function createSourcemapMiddleware(
 			res.end(item.code);
 		}
 	};
-
-	function isModule(filePath: string) {
-		if (bundlerMap.has(filePath)) return true;
-		for (const bundler of bundlerMap.values()) {
-			if (bundler.modules.has(filePath)) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	async function serve(bundler: Bundler, isMap: boolean, res: ServerResponse) {}
 }
-createSourcemapMiddleware.$inject = [
-	"karmaEsbuildEntryPoint",
-	"karmaEsbuildBundlerMap",
-];
+createMiddleware.$inject = ["karmaEsbuildEntryPoint", "karmaEsbuildBundlerMap"];
 
 function createEsbuildLog(logger: KarmaLogger) {
 	return logger.create("esbuild");
 }
 createEsbuildLog.$inject = ["logger"];
 
-function createEsbuildConfig(
-	config: karma.ConfigOptions & {
-		esbuild?: esbuild.BuildOptions & { bundleDelay?: number };
-	},
-) {
-	const basePath = getBasePath(config);
-	const { bundleDelay, ...userConfig } = config.esbuild || {};
-
-	// Use some trickery to get the root in both posix and win32. win32 could
-	// have multiple drive paths as root, so find root relative to the basePath.
-	userConfig.outdir = path.resolve(basePath, "/");
-	return userConfig;
-}
-createEsbuildConfig.$inject = ["config"];
-
-function createEsbuildBundlerFactory(log: Log, config: esbuild.BuildOptions) {
-	return function (file: string) {
-		return new Bundler(file, log, config);
-	};
-}
-createEsbuildBundlerFactory.$inject = [
-	"karmaEsbuildLogger",
-	"karmaEsbuildConfig",
-];
-
 function createTestEntryPoint() {
 	return new TestEntryPoint();
 }
 createTestEntryPoint.$inject = [] as const;
 
-function createBundlerMap(bundlerFactory: BundlerFactory) {
-	return new MapDefault<string, Bundler>(bundlerFactory);
+function createBundlerMap(
+	log: Log,
+	karmaConfig: karma.ConfigOptions & {
+		esbuild?: esbuild.BuildOptions & { bundleDelay?: number };
+	},
+) {
+	const basePath = getBasePath(karmaConfig);
+	const { bundleDelay, ...userConfig } = karmaConfig.esbuild || {};
+
+	const define = {
+		"process.env.NODE_ENV": JSON.stringify(
+			process.env.NODE_ENV || "development",
+		),
+		...userConfig.define,
+	};
+	const plugin: esbuild.Plugin = {
+		name: "module finder",
+		setup: build => {
+			build.onResolve({ filter: /./ }, args => {
+				const filePath = path.resolve(args.resolveDir, args.path);
+				bundlerMap.addPotential(filePath);
+				return null;
+			});
+		},
+	};
+	const config: esbuild.BuildOptions = {
+		target: "es2015",
+		...userConfig,
+		bundle: true,
+		write: false,
+		incremental: true,
+		platform: "browser",
+		sourcemap: "external",
+		define,
+		// Use some trickery to get the root in both posix and win32. win32 could
+		// have multiple drive paths as root, so find root relative to the basePath.
+		outdir: path.resolve(basePath, "/"),
+		plugins: [plugin].concat(userConfig.plugins || []),
+	};
+	const bundlerMap = new BundlerMap(log, config);
+	return bundlerMap;
 }
-createBundlerMap.$inject = ["karmaEsbuildBundlerFactory"];
+createBundlerMap.$inject = ["karmaEsbuildLogger", "config"];
 
 module.exports = {
 	"preprocessor:esbuild": ["factory", createPreprocessor],
-	"middleware:esbuild": ["factory", createSourcemapMiddleware],
+	"middleware:esbuild": ["factory", createMiddleware],
 
 	karmaEsbuildLogger: ["factory", createEsbuildLog],
-	karmaEsbuildConfig: ["factory", createEsbuildConfig],
 	karmaEsbuildBundlerMap: ["factory", createBundlerMap],
-	karmaEsbuildBundlerFactory: ["factory", createEsbuildBundlerFactory],
 	karmaEsbuildEntryPoint: ["factory", createTestEntryPoint],
 };
