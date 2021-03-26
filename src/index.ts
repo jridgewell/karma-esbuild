@@ -41,7 +41,7 @@ function createPreprocessor(
 	bundlerMap: BundlerMap,
 ): KarmaPreprocess {
 	const basePath = getBasePath(config);
-	const { bundleDelay = 700 } = config.esbuild || {};
+	const { bundleDelay = 700, format } = config.esbuild || {};
 
 	// Inject middleware to handle the bundled file and map.
 	config.middleware ||= [];
@@ -57,6 +57,7 @@ function createPreprocessor(
 		included: true,
 		served: false,
 		watched: false,
+		type: format === "esm" ? "module" : "js",
 	});
 	testEntryPoint.touch();
 	const entryPointBundle = bundlerMap.get(testEntryPoint.file);
